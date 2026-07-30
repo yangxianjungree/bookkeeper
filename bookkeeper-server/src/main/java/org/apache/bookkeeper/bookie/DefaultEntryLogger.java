@@ -56,6 +56,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import org.apache.bookkeeper.bookie.storage.CompactionEntryLog;
 import org.apache.bookkeeper.bookie.storage.EntryLogScanner;
@@ -91,6 +92,97 @@ public class DefaultEntryLogger implements EntryLogger {
         private final EntryLogMetadata entryLogMetadata;
         private final File logFile;
         private long ledgerIdAssigned = UNASSIGNED_LEDGERID;
+        private final ThreadLocal<Boolean> inEntryLogWrite = ThreadLocal.withInitial(() -> false);
+
+        @VisibleForTesting
+        static final class PartialFlushFault {
+            private static final AtomicBoolean enabled = new AtomicBoolean(false);
+            private static final AtomicBoolean fired = new AtomicBoolean(false);
+            private static volatile String targetLogPathContains = "";
+            private static volatile long injectedLogicalPosition = -1;
+            private static volatile long injectedPhysicalPosition = -1;
+            private static volatile int injectedBytes = -1;
+            private static volatile File injectedLogFile;
+
+            static void enableOnceForLogPathContaining(String logPathContains) {
+                targetLogPathContains = logPathContains;
+                injectedLogicalPosition = -1;
+                injectedPhysicalPosition = -1;
+                injectedBytes = -1;
+                injectedLogFile = null;
+                fired.set(false);
+                enabled.set(true);
+            }
+
+            static void reset() {
+                enabled.set(false);
+                fired.set(false);
+                targetLogPathContains = "";
+                injectedLogicalPosition = -1;
+                injectedPhysicalPosition = -1;
+                injectedBytes = -1;
+                injectedLogFile = null;
+            }
+
+            static boolean hasFired() {
+                return fired.get();
+            }
+
+            static long getInjectedLogicalPosition() {
+                return injectedLogicalPosition;
+            }
+
+            static long getInjectedPhysicalPosition() {
+                return injectedPhysicalPosition;
+            }
+
+            static int getInjectedBytes() {
+                return injectedBytes;
+            }
+
+            static File getInjectedLogFile() {
+                return injectedLogFile;
+            }
+
+            private static void maybeThrow(BufferedLogChannel logChannel, boolean inWrite) throws IOException {
+                if (!enabled.get() || !inWrite || fired.get()) {
+                    return;
+                }
+
+                if (!logChannel.logFile.getName().endsWith(".log")
+                        || !logChannel.logFile.getAbsolutePath().contains(targetLogPathContains)
+                        || logChannel.writeBuffer.writerIndex() < logChannel.writeCapacity) {
+                    return;
+                }
+
+                if (!fired.compareAndSet(false, true)) {
+                    return;
+                }
+
+                ByteBuffer toWrite = logChannel.writeBuffer.internalNioBuffer(
+                        0, logChannel.writeBuffer.writerIndex());
+                int bytes = toWrite.remaining();
+                while (toWrite.hasRemaining()) {
+                    logChannel.fileChannel.write(toWrite);
+                }
+
+                // Keep the file bytes but skip the normal logical-position update in write().
+                // This deterministic failpoint models the post-physical-write failure window
+                // needed to reproduce stale entry locations end-to-end.
+                logChannel.writeBuffer.clear();
+                injectedLogicalPosition = logChannel.position;
+                injectedPhysicalPosition = logChannel.fileChannel.position();
+                injectedBytes = bytes;
+                injectedLogFile = logChannel.logFile;
+                enabled.set(false);
+
+                LOG.warn("Injected entrylog partial flush failure: logId={}, logFile={}, logicalPosition={}, "
+                                + "physicalPosition={}, bytes={}",
+                        logChannel.logId, logChannel.logFile, injectedLogicalPosition, injectedPhysicalPosition,
+                        injectedBytes);
+                throw new IOException("Injected entrylog partial flush failure");
+            }
+        }
 
         public BufferedLogChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
                 long logId, File logFile, long unpersistedBytesBound) throws IOException {
@@ -121,6 +213,22 @@ public class DefaultEntryLogger implements EntryLogger {
 
         public void setLedgerIdAssigned(Long ledgerId) {
             this.ledgerIdAssigned = ledgerId;
+        }
+
+        @Override
+        public void write(ByteBuf src) throws IOException {
+            inEntryLogWrite.set(true);
+            try {
+                super.write(src);
+            } finally {
+                inEntryLogWrite.set(false);
+            }
+        }
+
+        @Override
+        public synchronized void flush() throws IOException {
+            PartialFlushFault.maybeThrow(this, inEntryLogWrite.get());
+            super.flush();
         }
 
         @Override
