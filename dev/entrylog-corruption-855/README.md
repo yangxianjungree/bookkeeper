@@ -7,6 +7,12 @@ This directory keeps investigation context for the BookKeeper entrylog corruptio
 
 The production file was `855.log`, which is entryLogId `2133` decimal / `0x855` hex.
 
+Chinese quick-start context:
+
+```text
+CONTEXT.zh.md
+```
+
 ## Primary Reading Order
 
 1. `context/855-entrylog-2133-concise-root-cause-report.md`
@@ -20,6 +26,8 @@ The production file was `855.log`, which is entryLogId `2133` decimal / `0x855` 
    - Includes fail-closed, channel poisoning, failure propagation, lifecycle, and compatibility considerations.
 4. `context/bookkeeper-bufferedchannel-entrylog-corruption-issue-draft.md`
    - The public issue body draft.
+5. `e2e-reproducer.md`
+   - Local BookKeeper E2E reproducer instructions.
 
 ## Supporting Material
 
@@ -29,6 +37,8 @@ The production file was `855.log`, which is entryLogId `2133` decimal / `0x855` 
   - Independent verification pass.
 - `context/855-entrylog-2133-source-position-verification-78faf567.md`
   - Independent verification pass. Earlier mistakes in this thread were corrected before the final conclusion.
+- `context/855-entrylog-2133-fix-plan.md`
+  - Older fix-plan draft, kept only for historical comparison.
 - `context/855-entrylog-2133-b65log-verification-78faf567.md`
   - Separate bookie/log investigation. It is not considered the same root cause as `855.log`, but is kept for context.
 
