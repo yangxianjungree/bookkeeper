@@ -119,6 +119,27 @@ All five rounds reproduced the target condition: `bk1` reported `DRIFT_OK`
 with an invalid stale header map offset, while healthy controls `bk2` and `bk3`
 reported `SEALED_OK` and entry hash comparisons had zero mismatches.
 
+## Unmodified-Source Cluster Goal
+
+The next reproduction layer should use unmodified BookKeeper/Pulsar source and
+introduce the fault only from outside the process. The planned local path is:
+
+```text
+Pulsar 3.2.4 broker/client/ZooKeeper tooling
+  -> external unmodified BookKeeper 4.16.7 bookies
+  -> LD_PRELOAD write/pwrite/writev wrapper enabled only for bk1
+  -> existing entrylog scanner and target/healthy replica comparison
+```
+
+Acceptance criteria:
+
+- the bk1 bookie runtime jar must not contain the deterministic failpoint class;
+- the fault injector must be auditable separately from BookKeeper source;
+- bk1 must reproduce the stale entrylog header or stale location evidence;
+- bk2/bk3 must remain healthy controls with strict entrylog parsing;
+- report output must compare entrylog headers, discovered ledger maps, ledger
+  size accounting, and entry hashes across all replicas.
+
 ## Offline Drift Scanner
 
 This directory includes a dependency-free structural scanner:
