@@ -1,0 +1,9 @@
+# LD_PRELOAD Stability Summary
+
+| round | bookieCount | ensemble | writeQuorum | ackQuorum | replicaComparisonApplicable | messages | size | rate | faultAfter | faultExactBytes | workloadRc | clientExit | faultEvents | faultBytes | realRc | bk1Status | bk1Log | bk1Delta | bk1HeaderMapValid | bk2Status | bk2Delta | bk3Status | bk3Delta | bk2Bk3MissingInTarget | bk2Bk3MissingInControl | bk2Bk3HashMismatches | bk1Bk2MissingInTarget | bk1Bk2HashMismatches | bk1Bk3MissingInTarget | bk1Bk3HashMismatches | bk1Eio | bk2Eio | bk3Eio | brokerBookieConnected | brokerConnectionReset | brokerManagedLedgerClose | clientDone |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| round-01 | 2 | 2 | 1 | 1 | False | 12000 | 512 | 500 | 1 | 65536 | 0 | 0 | 1 | 65536 | 65536 | STRICT_CHECK | 0.log | 66103 | False | SEALED_OK | 0 |  |  |  |  |  |  |  |  |  | True | False | False | True | True | True | True |
+| round-02 | 2 | 2 | 1 | 1 | False | 16000 | 768 | 700 | 2 | 65536 | 0 | 0 | 1 | 65536 | 65536 | DRIFT_CHECK | 1.log | 66113 | False | SEALED_OK | 0 |  |  |  |  |  |  |  |  |  | True | False | False | True | True | False | True |
+| round-03 | 2 | 2 | 1 | 1 | False | 20000 | 1024 | 900 | 3 | 65536 | 0 | 0 | 1 | 65536 | 65536 | DRIFT_CHECK | 2.log | 65934 | False | SEALED_OK | 0 |  |  |  |  |  |  |  |  |  | True | False | False | True | True | False | True |
+| round-04 | 2 | 2 | 1 | 1 | False | 24000 | 384 | 600 | 4 | 65536 | 0 | 0 | 1 | 65536 | 65536 | STRICT_CHECK | 3.log | 65917 | False | SEALED_OK | 0 |  |  |  |  |  |  |  |  |  | True | False | False | True | True | False | True |
+| round-05 | 2 | 2 | 1 | 1 | False | 28000 | 1536 | 1000 | 5 | 65536 | 0 | 0 | 1 | 65536 | 65536 | DRIFT_CHECK | 4.log | 65884 | False | SEALED_OK | 0 |  |  |  |  |  |  |  |  |  | True | False | False | True | True | True | True |

@@ -1,0 +1,4 @@
+/runtime/
+/runs/**/entrylogs/
+/runs/**/logs/
+/runs/**/entrylog-cluster-report.json

@@ -33,6 +33,7 @@ static __thread int in_hook;
 static int enabled;
 static int dry_run;
 static long min_write_bytes = 32768;
+static long exact_write_bytes;
 static long after_matches = 1;
 static long max_triggers = 1;
 static long matches_seen;
@@ -120,6 +121,7 @@ static void init_config(void) {
     enabled = env_flag("BK_ENTRYLOG_FAULT_ENABLED", 0);
     dry_run = env_flag("BK_ENTRYLOG_FAULT_DRY_RUN", 0);
     min_write_bytes = env_long("BK_ENTRYLOG_FAULT_MIN_WRITE_BYTES", min_write_bytes);
+    exact_write_bytes = env_long("BK_ENTRYLOG_FAULT_EXACT_WRITE_BYTES", exact_write_bytes);
     after_matches = env_long("BK_ENTRYLOG_FAULT_AFTER_MATCHES", after_matches);
     max_triggers = env_long("BK_ENTRYLOG_FAULT_MAX_TRIGGERS", max_triggers);
     copy_env_string("BK_ENTRYLOG_FAULT_PATH_CONTAINS", path_contains, sizeof(path_contains));
@@ -131,8 +133,9 @@ static void init_config(void) {
     }
 
     fault_log("bk-entrylog-fault: init enabled=%d dry_run=%d path_contains=%s suffix=%s "
-              "min_write_bytes=%ld after_matches=%ld max_triggers=%ld\n",
-              enabled, dry_run, path_contains, file_suffix, min_write_bytes, after_matches, max_triggers);
+              "min_write_bytes=%ld exact_write_bytes=%ld after_matches=%ld max_triggers=%ld\n",
+              enabled, dry_run, path_contains, file_suffix, min_write_bytes, exact_write_bytes,
+              after_matches, max_triggers);
 }
 
 static bool ends_with(const char *value, const char *suffix) {
@@ -172,7 +175,13 @@ static bool select_fault(const char *op, int fd, size_t count, char *path, size_
     bool selected = false;
 
     *match_number = 0;
-    if (!enabled || count < (size_t) min_write_bytes) {
+    if (!enabled) {
+        return false;
+    }
+    if (exact_write_bytes > 0 && count != (size_t) exact_write_bytes) {
+        return false;
+    }
+    if (exact_write_bytes == 0 && count < (size_t) min_write_bytes) {
         return false;
     }
     if (!fd_path(fd, path, path_size) || !path_matches(path)) {

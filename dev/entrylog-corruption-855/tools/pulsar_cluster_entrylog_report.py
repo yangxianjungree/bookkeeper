@@ -40,6 +40,13 @@ FAILPOINT_RE = re.compile(
     r"physicalPosition=(?P<physical>\d+), bytes=(?P<bytes>\d+)"
 )
 
+LD_PRELOAD_FAULT_RE = re.compile(
+    r"bk-entrylog-fault: (?P<kind>dry-run-would-trigger|triggering) "
+    r"op=(?P<op>\w+) fd=(?P<fd>\d+) path=(?P<path>.*) count=(?P<count>\d+) "
+    r"offset=(?P<offset>-?\d+) real_rc=(?P<real_rc>-?\d+) match=(?P<match>\d+) "
+    r"trigger=(?P<trigger>\d+) errno=EIO"
+)
+
 
 def parse_versions(cluster_dir):
     path = cluster_dir / "versions.properties"
@@ -70,9 +77,34 @@ def parse_failpoint_events(cluster_dir):
         for line in text.splitlines():
             match = FAILPOINT_RE.search(line)
             if not match:
+                match = LD_PRELOAD_FAULT_RE.search(line)
+                if not match:
+                    continue
+                log_file = Path(match.group("path"))
+                try:
+                    log_id = int(log_file.stem, 16)
+                except ValueError:
+                    log_id = None
+                events.append({
+                    "kind": "ldpreload",
+                    "sourceLog": str(path),
+                    "logId": log_id,
+                    "logFile": str(log_file),
+                    "logFileName": log_file.name,
+                    "logicalPosition": None,
+                    "physicalPosition": None,
+                    "bytes": int(match.group("count")),
+                    "op": match.group("op"),
+                    "offset": int(match.group("offset")),
+                    "realRc": int(match.group("real_rc")),
+                    "match": int(match.group("match")),
+                    "trigger": int(match.group("trigger")),
+                    "line": line,
+                })
                 continue
             log_file = Path(match.group("log_file"))
             events.append({
+                "kind": "java-failpoint",
                 "sourceLog": str(path),
                 "logId": int(match.group("log_id")),
                 "logFile": str(log_file),
@@ -80,18 +112,182 @@ def parse_failpoint_events(cluster_dir):
                 "logicalPosition": int(match.group("logical")),
                 "physicalPosition": int(match.group("physical")),
                 "bytes": int(match.group("bytes")),
+                "op": None,
+                "offset": None,
+                "realRc": None,
+                "match": None,
+                "trigger": None,
                 "line": line,
             })
     return events
 
 
-def event_for_path(events, path):
+def event_for_path(events, path, role=None):
+    if role is not None and role != "bk1":
+        return None
+
     resolved = str(path.resolve())
+    log_id = entrylog_id_from_filename(path)
     for event in events:
         event_path = Path(event["logFile"])
         if event_path.exists() and str(event_path.resolve()) == resolved:
             return event
+        if role == "bk1" and event.get("logId") == log_id and event.get("logFileName") == path.name:
+            return event
     return None
+
+
+def cell(value):
+    return "" if value is None else value
+
+
+def read_log_lines(path):
+    if not path.exists():
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def extract_log_snippets(path, patterns, limit=6, tag="match"):
+    lines = read_log_lines(path)
+    compiled = [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+    snippets = []
+    for line_no, line in enumerate(lines, start=1):
+        if any(pattern.search(line) for pattern in compiled):
+            snippets.append({"line": line_no, "tag": tag, "text": line})
+            if len(snippets) >= limit:
+                break
+    return snippets
+
+
+def extract_log_snippets_by_group(path, groups, per_group_limit=4):
+    lines = read_log_lines(path)
+    snippets = []
+    selected_lines = set()
+
+    for tag, patterns in groups:
+        compiled = [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+        group_count = 0
+        for line_no, line in enumerate(lines, start=1):
+            if line_no in selected_lines:
+                continue
+            if any(pattern.search(line) for pattern in compiled):
+                snippets.append({"line": line_no, "tag": tag, "text": line})
+                selected_lines.add(line_no)
+                group_count += 1
+                if group_count >= per_group_limit:
+                    break
+    return snippets
+
+
+def extract_client_exit(cluster_dir):
+    path = cluster_dir / "logs" / "client" / "pulsar-perftest.log"
+    for line in reversed(read_log_lines(path)):
+        match = re.search(r"workload_rc=(\d+)", line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def collect_runtime_behavior(cluster_dir):
+    bookie_groups = [
+        ("bookie-fault", [
+            r"Exception flushing ledgers",
+            r"Input/output error",
+        ]),
+        ("entrylog-io", [
+            r"Created new entry log file",
+            r"Flushing entry logger",
+            r"Synced entry logger",
+        ]),
+        ("bookie-lifecycle", [
+            r"Turning bookie to read only during shut down",
+            r"Triggering shutdown of Bookie-\d+ with exitCode",
+            r"BookieDeathWatcher noticed the bookie is not running any more",
+            r"Triggered exceptionHandler of Component: bookie-server",
+            r"Shutting down BookieServer",
+        ]),
+    ]
+    behavior = {
+        "clientExit": extract_client_exit(cluster_dir),
+        "broker": extract_log_snippets_by_group(
+            cluster_dir / "logs" / "broker" / "stdout.log",
+            [
+                ("bk-client-init", [
+                    r"MetadataDrivers - BookKeeper metadata driver",
+                    r"BookKeeperClientFactoryImpl",
+                    r"bookkeeper client configuration",
+                ]),
+                ("bookie-discovery", [
+                    r"NetworkTopologyImpl - Adding a new node: .*127\.0\.0\.1:318[0-9]",
+                    r"BookieInfoReader",
+                    r"Update BookieInfoCache",
+                ]),
+                ("bookie-channel", [
+                    r"PerChannelBookieClient - Successfully connected to bookie",
+                    r"PerChannelBookieClient - connection .* authenticated as BookKeeperPrincipal",
+                ]),
+                ("managed-ledger", [
+                    r"ManagedLedger.*Closing managed ledger",
+                    r"ManagedLedger.*ConnectionLost",
+                    r"ManagedLedger.*WARN",
+                    r"ManagedLedger.*ERROR",
+                    r"ManagedLedger.*failed",
+                    r"ManagedLedger.*exception",
+                ]),
+                ("broker-error", [
+                    r"PerChannelBookieClient - Exception caught on:.*Connection reset",
+                    r"Disconnected from bookie channel",
+                    r"java\.net\.SocketException: Connection reset",
+                    r"write failed",
+                    r"failed .* write",
+                    r"Connection loss while executing batch operation",
+                    r"ZooKeeper client is disconnected",
+                    r"Session .* SessionExpiredException",
+                    r"Connection refused",
+                ]),
+            ],
+            per_group_limit=6,
+        ),
+        "client": extract_log_snippets_by_group(
+            cluster_dir / "logs" / "client" / "pulsar-perftest.log",
+            [
+                ("client-progress", [
+                    r"Throughput produced",
+                    r"Aggregated throughput stats",
+                    r"Aggregated latency stats",
+                ]),
+                ("client-completion", [
+                    r"DONE",
+                    r"workload_rc=",
+                ]),
+                ("client-error", [
+                    r"failure [1-9]",
+                    r"error",
+                    r"exception",
+                ]),
+            ],
+            per_group_limit=8,
+        ),
+    }
+    for role in ("bk1", "bk2", "bk3"):
+        behavior[role] = extract_log_snippets_by_group(
+            cluster_dir / "logs" / role / "stdout.log",
+            bookie_groups,
+            per_group_limit=6,
+        )
+    return behavior
+
+
+def replica_comparison_applicable(versions):
+    ensemble = versions.get("managedLedgerDefaultEnsembleSize")
+    write_quorum = versions.get("managedLedgerDefaultWriteQuorum")
+    try:
+        return int(ensemble) == int(write_quorum)
+    except (TypeError, ValueError):
+        return True
 
 
 def collect_entries(path, physical_start, write_buffer_bytes, max_entry_size):
@@ -158,11 +354,14 @@ def collect_entries(path, physical_start, write_buffer_bytes, max_entry_size):
 
 
 def find_entrylogs(cluster_dir):
-    data_dir = cluster_dir / "data"
     roles = []
     for role in ("bk1", "bk2", "bk3"):
-        current = data_dir / role / "ledgers" / "current"
-        if not current.exists():
+        candidates = [
+            cluster_dir / "data" / role / "ledgers" / "current",
+            cluster_dir / "entrylogs" / role,
+        ]
+        current = next((candidate for candidate in candidates if candidate.exists()), None)
+        if current is None:
             continue
         for path in sorted(current.glob("*.log")):
             if path.stat().st_size > 0:
@@ -259,19 +458,29 @@ def print_report(report):
     print(f"- clusterDir: `{report['clusterDir']}`")
     print(f"- pulsarVersion: `{versions.get('pulsarVersion', 'unknown')}`")
     print(f"- bookieVersion: `{versions.get('bookieVersion', 'unknown')}`")
+    print(f"- bookieCount: `{versions.get('bookieCount', 'unknown')}`")
+    print(
+        f"- managedLedgerQuorum: `{versions.get('managedLedgerDefaultEnsembleSize', 'unknown')}/"
+        f"{versions.get('managedLedgerDefaultWriteQuorum', 'unknown')}/"
+        f"{versions.get('managedLedgerDefaultAckQuorum', 'unknown')}`"
+    )
     print(f"- failpointEvents: `{len(report['failpointEvents'])}`")
     print()
 
     print("## Failpoint Events")
     print()
     if not report["failpointEvents"]:
-        print("No failpoint event found in bk1 logs.")
+        print("No fault event found in bk1 logs.")
     else:
-        print("| logId | logFile | logical | physical | bytes |")
-        print("|---:|---|---:|---:|---:|")
+        print("| kind | logId | logFile | logical | physical | bytes | op | offset | realRc | match | trigger |")
+        print("|---|---:|---|---:|---:|---:|---|---:|---:|---:|---:|")
         for event in report["failpointEvents"]:
-            print(f"| {event['logId']} | `{event['logFile']}` | {event['logicalPosition']} | "
-                  f"{event['physicalPosition']} | {event['bytes']} |")
+            print(
+                f"| {cell(event.get('kind', 'unknown'))} | {cell(event.get('logId'))} | `{event['logFile']}` | "
+                f"{cell(event.get('logicalPosition'))} | {cell(event.get('physicalPosition'))} | "
+                f"{cell(event.get('bytes'))} | {cell(event.get('op'))} | {cell(event.get('offset'))} | "
+                f"{cell(event.get('realRc'))} | {cell(event.get('match'))} | {cell(event.get('trigger'))} |"
+            )
     print()
 
     print("## Log Structure")
@@ -295,27 +504,50 @@ def print_report(report):
 
     print("## Replica Entry Comparison")
     print()
-    print("| target | control | targetEntries | controlEntries | common | missingInTarget | "
-          "missingInControl | hashMismatches |")
-    print("|---|---|---:|---:|---:|---:|---:|---:|")
-    for comparison in report["comparisons"]:
-        print(f"| {comparison['target']} | {comparison['control']} | {comparison['targetEntries']} | "
-              f"{comparison['controlEntries']} | {comparison['commonEntries']} | "
-              f"{comparison['missingInTarget']} | {comparison['missingInControl']} | "
-              f"{comparison['hashMismatches']} |")
-    print()
+    if not report["replicaComparisonApplicable"]:
+        print("Skipped: write quorum is smaller than ensemble size, so entries are intentionally single-copy distributed across bookies.")
+        print()
+    else:
+        print("| target | control | targetEntries | controlEntries | common | missingInTarget | "
+              "missingInControl | hashMismatches |")
+        print("|---|---|---:|---:|---:|---:|---:|---:|")
+        for comparison in report["comparisons"]:
+            print(f"| {comparison['target']} | {comparison['control']} | {comparison['targetEntries']} | "
+                  f"{comparison['controlEntries']} | {comparison['commonEntries']} | "
+                  f"{comparison['missingInTarget']} | {comparison['missingInControl']} | "
+                  f"{comparison['hashMismatches']} |")
+        print()
 
-    for comparison in report["comparisons"]:
-        if comparison["hashMismatches"] or comparison["missingInTarget"] or comparison["missingInControl"]:
-            print(f"### Samples: {comparison['target']} vs {comparison['control']}")
-            print()
-            if comparison["missingInTargetSample"]:
-                print(f"- missingInTarget: `{', '.join(comparison['missingInTargetSample'])}`")
-            if comparison["missingInControlSample"]:
-                print(f"- missingInControl: `{', '.join(comparison['missingInControlSample'])}`")
-            if comparison["hashMismatchSample"]:
-                samples = [item["key"] for item in comparison["hashMismatchSample"]]
-                print(f"- hashMismatches: `{', '.join(samples)}`")
+        for comparison in report["comparisons"]:
+            if comparison["hashMismatches"] or comparison["missingInTarget"] or comparison["missingInControl"]:
+                print(f"### Samples: {comparison['target']} vs {comparison['control']}")
+                print()
+                if comparison["missingInTargetSample"]:
+                    print(f"- missingInTarget: `{', '.join(comparison['missingInTargetSample'])}`")
+                if comparison["missingInControlSample"]:
+                    print(f"- missingInControl: `{', '.join(comparison['missingInControlSample'])}`")
+                if comparison["hashMismatchSample"]:
+                    samples = [item["key"] for item in comparison["hashMismatchSample"]]
+                    print(f"- hashMismatches: `{', '.join(samples)}`")
+                print()
+
+    print("## Runtime Behavior")
+    print()
+    print(f"- clientExit: `{report['runtimeBehavior'].get('clientExit')}`")
+    print()
+    runtime_roles = ("bk1", "bk2", "bk3", "broker", "client")
+    for index, role in enumerate(runtime_roles):
+        print(f"### {role}")
+        print()
+        snippets = report["runtimeBehavior"].get(role) or []
+        if not snippets:
+            print("No matching log lines found.")
+        else:
+            print("| line | tag | log |")
+            print("|---:|---|---|")
+            for snippet in snippets:
+                print(f"| {snippet['line']} | {snippet.get('tag', '')} | `{snippet['text']}` |")
+        if index != len(runtime_roles) - 1:
             print()
 
 
@@ -323,10 +555,11 @@ def build_report(args):
     cluster_dir = args.cluster_dir.resolve()
     versions = parse_versions(cluster_dir)
     events = parse_failpoint_events(cluster_dir)
+    runtime_behavior = collect_runtime_behavior(cluster_dir)
     parsed_logs = []
 
     for role, path in find_entrylogs(cluster_dir):
-        event = event_for_path(events, path)
+        event = event_for_path(events, path, role)
         physical_start = event["physicalPosition"] if event else None
         analysis = analyze_entrylog(
             path,
@@ -352,17 +585,19 @@ def build_report(args):
 
     indexes = {}
     duplicates = {}
-    for role in ("bk1", "bk2", "bk3"):
+    present_roles = sorted({item["role"] for item in parsed_logs})
+    for role in present_roles:
         index, role_duplicates = entry_index(role_logs(parsed_logs, role))
         indexes[role] = index
         duplicates[role] = role_duplicates
 
+    comparison_applicable = replica_comparison_applicable(versions)
     comparisons = []
-    if indexes.get("bk2") is not None and indexes.get("bk3") is not None:
+    if comparison_applicable and "bk2" in indexes and "bk3" in indexes:
         comparisons.append(compare_indexes("bk2", indexes["bk2"], "bk3", indexes["bk3"], args.sample_limit))
-    if indexes.get("bk1") is not None:
+    if comparison_applicable and "bk1" in indexes:
         for control in ("bk2", "bk3"):
-            if indexes.get(control) is not None:
+            if control in indexes:
                 comparisons.append(compare_indexes("bk1", indexes["bk1"], control, indexes[control], args.sample_limit))
 
     return {
@@ -371,12 +606,14 @@ def build_report(args):
         "failpointEvents": events,
         "logs": parsed_logs,
         "comparisons": comparisons,
+        "replicaComparisonApplicable": comparison_applicable,
         "duplicates": duplicates,
+        "runtimeBehavior": runtime_behavior,
     }
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Compare BookKeeper entrylogs from the Pulsar failpoint harness.")
+    parser = argparse.ArgumentParser(description="Compare BookKeeper entrylogs from the local Pulsar harness.")
     parser.add_argument("--cluster-dir", type=Path, required=True, help="Harness runtime directory")
     parser.add_argument("--write-buffer-bytes", type=lambda value: int(value, 0), default=65536)
     parser.add_argument("--max-entry-size", type=lambda value: int(value, 0), default=64 * 1024 * 1024)
