@@ -90,3 +90,104 @@ BookKeeper client addEntry
 ```
 
 The expected pre-fix bad state is not just an injected `IOException`; the target proof is a stable offset between physical entry bytes and logical/indexed positions after the failed entrylog channel is reused.
+
+## Reproduction Evidence Chain
+
+The reproduction work is intentionally split into layers. Each layer answers a different credibility question:
+
+| Layer | Goal | Status |
+| --- | --- | --- |
+| Unit test | Prove the local `BufferedChannel` physical/logical position window is reachable. | Done |
+| BookKeeper E2E | Prove the real Bookie/`DbLedgerStorage` path can persist stale entry locations and a stale entrylog header, with a healthy replica as control. | Done |
+| Pulsar cluster with failpoint | Prove the full Pulsar broker -> managed ledger -> BookKeeper path can reproduce the same target/healthy replica drift in a disposable cluster. | Done |
+| Unmodified Pulsar/BookKeeper cluster | Prove an unmodified binary can enter the same state under an external I/O fault injector, so the result is not dependent on source changes. | Next |
+| Fixed build comparison | Prove the proposed fix fails closed under the same fault and does not publish stale entry locations or stale header offsets. | Later |
+
+The failpoint cluster run is for deterministic engineering validation. The unmodified-binary run is the persuasive version for external review: BookKeeper/Pulsar code should be unchanged, with the fault introduced only by an auditable external layer such as `LD_PRELOAD`, FUSE, or a block-device fault injector.
+
+The Pulsar failpoint cluster evidence uses Pulsar 3.2.4 as broker/client tooling
+and external BookKeeper 4.16.7 bookies. Pulsar 3.2.4 embeds BookKeeper 4.16.6
+client-side jars, but the bookie runtime and entrylog evidence are from the
+separate BookKeeper 4.16.7 distribution. The local five-round stability archive
+is under:
+
+```text
+dev/entrylog-corruption-855/pulsar-failpoint-4.16.7-bookie-cluster/runs/stability-20260731-151541/
+```
+
+All five rounds reproduced the target condition: `bk1` reported `DRIFT_OK`
+with an invalid stale header map offset, while healthy controls `bk2` and `bk3`
+reported `SEALED_OK` and entry hash comparisons had zero mismatches.
+
+## Offline Drift Scanner
+
+This directory includes a dependency-free structural scanner:
+
+```bash
+dev/entrylog-corruption-855/tools/entrylog_drift_scanner.py
+```
+
+It does not hard-code the `855.log` offsets. It derives drift evidence from the input file and optional E2E properties:
+
+- entrylog header `ledgersMapOffset` / `ledgersCount`;
+- entry frame lengths and `ledgerId / entryId / lac` fields;
+- ledgers map marker `ledgerId=-1, entryId=-2`;
+- real file length;
+- optional E2E fields such as `injectedPhysicalPosition`, `indexedPosition`, and `writeBufferBytes`.
+
+Batch-scan E2E artifacts:
+
+```bash
+dev/entrylog-corruption-855/tools/entrylog_drift_scanner.py \
+  --e2e-dir bookkeeper-server/target/entrylog-partial-flush-e2e-runs
+```
+
+Scan every non-empty target/healthy entrylog copied by an E2E run:
+
+```bash
+dev/entrylog-corruption-855/tools/entrylog_drift_scanner.py \
+  --e2e-dir bookkeeper-server/target/entrylog-partial-flush-e2e-healthy-runs \
+  --all-logs
+```
+
+Verify V3 CRC32 digests for complete entries while scanning E2E artifacts:
+
+```bash
+dev/entrylog-corruption-855/tools/entrylog_drift_scanner.py \
+  --e2e-dir bookkeeper-server/target/entrylog-partial-flush-e2e-healthy-runs \
+  --all-logs \
+  --digest-type crc32
+```
+
+Scan a single entrylog with a known or suspected write-buffer boundary:
+
+```bash
+dev/entrylog-corruption-855/tools/entrylog_drift_scanner.py \
+  /path/to/855.log \
+  --write-buffer-bytes 65536
+```
+
+Scan with an exported properties file:
+
+```bash
+dev/entrylog-corruption-855/tools/entrylog_drift_scanner.py \
+  /path/to/run01-0.log \
+  --properties /path/to/run01.properties
+```
+
+The scanner can prove structural consistency:
+
+- strict entry framing up to the suspect point;
+- a continuous physical entry chain from the recovered physical start to the real ledgers map;
+- the suspect byte interval around the pivot;
+- `trueMapStart - header.ledgersMapOffset`;
+- parsed complete-entry byte totals equal the ledgers map totals;
+- optional candidate `indexedPosition + derivedDelta` points at the expected entry.
+
+With `--digest-type`, the scanner can also verify V3 entry digests for every complete entry outside the suspect interval:
+
+- `crc32`;
+- `crc32c` with a dependency-free pure Python implementation;
+- `mac` using HMAC-SHA1 and `--password` or `--password-hex`.
+
+It still needs the correct ledger digest type and password/master-key material. An exported location-index dump is still required to prove every indexed location, not only the entrylog bytes and candidate locations.

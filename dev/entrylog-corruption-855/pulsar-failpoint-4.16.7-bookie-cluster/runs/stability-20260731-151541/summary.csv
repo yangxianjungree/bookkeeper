@@ -1,0 +1,6 @@
+round,topic,messages,size,rate,workloadRc,failpoints,bk1Status,bk1Delta,bk1HeaderMapValid,bk2Status,bk3Status,bk2Bk3Mismatch,bk1Bk2MissingTarget,bk1Bk2MissingControl,bk1Bk2Mismatch
+1,persistent://public/default/entrylog-failpoint-r1,20000,512,500,0,1,DRIFT_OK,135,False,SEALED_OK,SEALED_OK,0,0,0,0
+2,persistent://public/default/entrylog-failpoint-r2,25000,768,700,0,1,DRIFT_OK,295,False,SEALED_OK,SEALED_OK,0,0,0,0
+3,persistent://public/default/entrylog-failpoint-r3,30000,1024,900,0,1,DRIFT_OK,1728,False,SEALED_OK,SEALED_OK,0,0,0,0
+4,persistent://public/default/entrylog-failpoint-r4,35000,384,600,0,1,DRIFT_OK,158,False,SEALED_OK,SEALED_OK,0,0,0,0
+5,persistent://public/default/entrylog-failpoint-r5,40000,1536,1000,0,1,DRIFT_OK,3283,False,SEALED_OK,SEALED_OK,0,0,0,0

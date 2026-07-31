@@ -96,8 +96,13 @@ public class DefaultEntryLogger implements EntryLogger {
 
         @VisibleForTesting
         static final class PartialFlushFault {
+            private static final String ENABLED_PROPERTY = "bk.entrylog.partialFlushFault.enabled";
+            private static final String ENABLED_ENV = "BK_ENTRYLOG_PARTIAL_FLUSH_FAULT_ENABLED";
+            private static final String TARGET_PATH_PROPERTY = "bk.entrylog.partialFlushFault.targetLogPathContains";
+            private static final String TARGET_PATH_ENV = "BK_ENTRYLOG_PARTIAL_FLUSH_FAULT_TARGET_LOG_PATH_CONTAINS";
             private static final AtomicBoolean enabled = new AtomicBoolean(false);
             private static final AtomicBoolean fired = new AtomicBoolean(false);
+            private static final AtomicBoolean configured = new AtomicBoolean(false);
             private static volatile String targetLogPathContains = "";
             private static volatile long injectedLogicalPosition = -1;
             private static volatile long injectedPhysicalPosition = -1;
@@ -105,7 +110,8 @@ public class DefaultEntryLogger implements EntryLogger {
             private static volatile File injectedLogFile;
 
             static void enableOnceForLogPathContaining(String logPathContains) {
-                targetLogPathContains = logPathContains;
+                configured.set(true);
+                targetLogPathContains = logPathContains == null ? "" : logPathContains;
                 injectedLogicalPosition = -1;
                 injectedPhysicalPosition = -1;
                 injectedBytes = -1;
@@ -115,6 +121,7 @@ public class DefaultEntryLogger implements EntryLogger {
             }
 
             static void reset() {
+                configured.set(false);
                 enabled.set(false);
                 fired.set(false);
                 targetLogPathContains = "";
@@ -144,7 +151,51 @@ public class DefaultEntryLogger implements EntryLogger {
                 return injectedLogFile;
             }
 
+            private static void maybeEnableFromConfiguration() {
+                if (!configured.compareAndSet(false, true)) {
+                    return;
+                }
+                if (!booleanSetting(ENABLED_PROPERTY, ENABLED_ENV, false)) {
+                    return;
+                }
+
+                String configuredTargetLogPathContains = stringSetting(TARGET_PATH_PROPERTY, TARGET_PATH_ENV, "");
+                targetLogPathContains = configuredTargetLogPathContains;
+                injectedLogicalPosition = -1;
+                injectedPhysicalPosition = -1;
+                injectedBytes = -1;
+                injectedLogFile = null;
+                fired.set(false);
+                enabled.set(true);
+
+                LOG.warn("Configured entrylog partial flush failpoint: targetLogPathContains='{}'",
+                        configuredTargetLogPathContains);
+            }
+
+            private static boolean booleanSetting(String propertyName, String envName, boolean defaultValue) {
+                String value = System.getProperty(propertyName);
+                if (value == null || value.isEmpty()) {
+                    value = System.getenv(envName);
+                }
+                if (value == null || value.isEmpty()) {
+                    return defaultValue;
+                }
+                return Boolean.parseBoolean(value)
+                        || "1".equals(value)
+                        || "yes".equalsIgnoreCase(value)
+                        || "on".equalsIgnoreCase(value);
+            }
+
+            private static String stringSetting(String propertyName, String envName, String defaultValue) {
+                String value = System.getProperty(propertyName);
+                if (value == null || value.isEmpty()) {
+                    value = System.getenv(envName);
+                }
+                return value == null ? defaultValue : value;
+            }
+
             private static void maybeThrow(BufferedLogChannel logChannel, boolean inWrite) throws IOException {
+                maybeEnableFromConfiguration();
                 if (!enabled.get() || !inWrite || fired.get()) {
                     return;
                 }
