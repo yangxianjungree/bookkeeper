@@ -100,7 +100,8 @@ The reproduction work is intentionally split into layers. Each layer answers a d
 | Unit test | Prove the local `BufferedChannel` physical/logical position window is reachable. | Done |
 | BookKeeper E2E | Prove the real Bookie/`DbLedgerStorage` path can persist stale entry locations and a stale entrylog header, with a healthy replica as control. | Done |
 | Pulsar cluster with failpoint | Prove the full Pulsar broker -> managed ledger -> BookKeeper path can reproduce the same target/healthy replica drift in a disposable cluster. | Done |
-| Unmodified Pulsar/BookKeeper cluster | Prove an unmodified binary can enter the same state under an external I/O fault injector, so the result is not dependent on source changes. | Next |
+| Unmodified Pulsar/BookKeeper cluster | Prove an unmodified binary can enter the same failure class under an external I/O fault injector, so the result is not dependent on source changes. | Done |
+| K8s standard deployment handoff | Package the unmodified-binary approach so it can be reproduced on a standard K8s deployment without exposing this internal branch. | Done |
 | Fixed build comparison | Prove the proposed fix fails closed under the same fault and does not publish stale entry locations or stale header offsets. | Later |
 
 The failpoint cluster run is for deterministic engineering validation. The unmodified-binary run is the persuasive version for external review: BookKeeper/Pulsar code should be unchanged, with the fault introduced only by an auditable external layer such as `LD_PRELOAD`, FUSE, or a block-device fault injector.
@@ -119,10 +120,10 @@ All five rounds reproduced the target condition: `bk1` reported `DRIFT_OK`
 with an invalid stale header map offset, while healthy controls `bk2` and `bk3`
 reported `SEALED_OK` and entry hash comparisons had zero mismatches.
 
-## Unmodified-Source Cluster Goal
+## Unmodified-Source Cluster Result
 
-The next reproduction layer should use unmodified BookKeeper/Pulsar source and
-introduce the fault only from outside the process. The planned local path is:
+The local unmodified-source layer uses unmodified BookKeeper/Pulsar source and
+introduces the fault only from outside the process:
 
 ```text
 Pulsar 3.2.4 broker/client/ZooKeeper tooling
@@ -131,14 +132,36 @@ Pulsar 3.2.4 broker/client/ZooKeeper tooling
   -> existing entrylog scanner and target/healthy replica comparison
 ```
 
-Acceptance criteria:
+Local evidence archives:
+
+```text
+dev/entrylog-corruption-855/pulsar-ldpreload-4.16.7-bookie-cluster/runs/stability-20260731-175938/
+dev/entrylog-corruption-855/pulsar-ldpreload-4.16.7-bookie-cluster/runs/single-replica-20260731-184741/
+```
+
+Observed result:
 
 - the bk1 bookie runtime jar must not contain the deterministic failpoint class;
-- the fault injector must be auditable separately from BookKeeper source;
-- bk1 must reproduce the stale entrylog header or stale location evidence;
-- bk2/bk3 must remain healthy controls with strict entrylog parsing;
-- report output must compare entrylog headers, discovered ledger maps, ledger
-  size accounting, and entry hashes across all replicas.
+- the fault injector is auditable separately from BookKeeper source;
+- both archived 5-round suites triggered exactly one target-bookie entrylog I/O fault per round;
+- target `bk1` reproduced stale entrylog header/map drift evidence in all archived rounds;
+- healthy controls stayed strict: `bk2`/`bk3` reported `SEALED_OK` where present;
+- the client workload completed in all archived rounds, while broker/bookie logs captured the target fault path.
+
+Evidence strength note: the deterministic failpoint suite reached the strongest
+`DRIFT_OK` condition in every archived round, including closed ledger size
+accounting from parsed physical entries to the discovered ledgers map. The
+unmodified `LD_PRELOAD` suites are intentionally closer to a real syscall-level
+fault, and the archived target `bk1` rows are `DRIFT_CHECK` or `STRICT_CHECK`,
+not `DRIFT_OK`. Those rows prove the external-fault, stale-header/map, and
+runtime-chain behavior, but they should not be described as matching the full
+`855.log` ledger-size-accounting closure in every round.
+
+The standard K8s handoff for this layer is:
+
+```text
+dev/entrylog-corruption-855/k8s-reproducer-handoff.md
+```
 
 ## Offline Drift Scanner
 
