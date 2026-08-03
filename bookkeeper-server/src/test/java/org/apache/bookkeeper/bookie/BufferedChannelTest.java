@@ -157,6 +157,46 @@ public class BufferedChannelTest {
         logChannel.close();
     }
 
+    @Test
+    public void testLedgersMapHeaderCanBeTornByShortPositionedWrite() throws Exception {
+        File newLogFile = File.createTempFile("test", "log");
+        newLogFile.deleteOnExit();
+        FileChannel delegate = new RandomAccessFile(newLogFile, "rw").getChannel();
+        writeEntryLogHeader(delegate);
+        PartialFailingFileChannel fileChannel = PartialFailingFileChannel.shortPositionedWrite(
+                delegate, DefaultEntryLogger.LEDGERS_MAP_OFFSET_POSITION, Long.BYTES);
+
+        DefaultEntryLogger.BufferedLogChannel logChannel = new DefaultEntryLogger.BufferedLogChannel(
+                UnpooledByteBufAllocator.DEFAULT, fileChannel, 64, INTERNAL_BUFFER_READ_CAPACITY, 1L, newLogFile, 0);
+
+        logChannel.write(Unpooled.wrappedBuffer(new byte[] { 1 }));
+        logChannel.flush();
+
+        long actualMapOffset = logChannel.position();
+        logChannel.registerWrittenEntry(1234L, 1L);
+        logChannel.appendLedgersMap();
+
+        ByteBuffer mapInfo = ByteBuffer.allocate(Long.BYTES + Integer.BYTES);
+        Assert.assertEquals(mapInfo.capacity(),
+                fileChannel.read(mapInfo, DefaultEntryLogger.LEDGERS_MAP_OFFSET_POSITION));
+        mapInfo.flip();
+        Assert.assertEquals(actualMapOffset, mapInfo.getLong());
+        Assert.assertEquals("A short positioned write left ledgersCount as the zero from the initial header",
+                0, mapInfo.getInt());
+        Assert.assertTrue(fileChannel.shortPositionedWriteDone);
+
+        ByteBuffer actualMap = ByteBuffer.allocate(DefaultEntryLogger.LEDGERS_MAP_HEADER_SIZE);
+        Assert.assertEquals(actualMap.capacity(), fileChannel.read(actualMap, actualMapOffset));
+        actualMap.flip();
+        Assert.assertEquals(DefaultEntryLogger.LEDGERS_MAP_HEADER_SIZE + DefaultEntryLogger.LEDGERS_MAP_ENTRY_SIZE
+                - Integer.BYTES, actualMap.getInt());
+        Assert.assertEquals(DefaultEntryLogger.INVALID_LID, actualMap.getLong());
+        Assert.assertEquals(DefaultEntryLogger.LEDGERS_MAP_ENTRY_ID, actualMap.getLong());
+        Assert.assertEquals(1, actualMap.getInt());
+
+        logChannel.close();
+    }
+
     public void testBufferedChannel(int byteBufLength, int numOfWrites, int unpersistedBytesBound, boolean flush,
             boolean shouldForceWrite) throws Exception {
         File newLogFile = File.createTempFile("test", "log");
@@ -221,27 +261,55 @@ public class BufferedChannelTest {
         return bb;
     }
 
+    private static void writeEntryLogHeader(FileChannel fileChannel) throws IOException {
+        ByteBuffer header = ByteBuffer.allocate(DefaultEntryLogger.LOGFILE_HEADER_SIZE);
+        header.put("BKLO".getBytes("UTF-8"));
+        header.putInt(DefaultEntryLogger.HEADER_CURRENT_VERSION);
+        header.position(DefaultEntryLogger.LOGFILE_HEADER_SIZE);
+        header.flip();
+        while (header.hasRemaining()) {
+            fileChannel.write(header);
+        }
+        fileChannel.position(DefaultEntryLogger.LOGFILE_HEADER_SIZE);
+    }
+
     private static final class PartialFailingFileChannel extends FileChannel {
         private final FileChannel delegate;
         private final int bytesBeforeFailure;
+        private final boolean failRegularWrite;
+        private final long shortPositionedWritePosition;
+        private final int shortPositionedWriteBytes;
         private boolean partialWriteDone;
         private boolean failureInjected;
+        private boolean shortPositionedWriteDone;
 
         private PartialFailingFileChannel(FileChannel delegate, int bytesBeforeFailure) {
+            this(delegate, bytesBeforeFailure, true, -1L, -1);
+        }
+
+        private PartialFailingFileChannel(FileChannel delegate, int bytesBeforeFailure, boolean failRegularWrite,
+                                         long shortPositionedWritePosition, int shortPositionedWriteBytes) {
             this.delegate = delegate;
             this.bytesBeforeFailure = bytesBeforeFailure;
+            this.failRegularWrite = failRegularWrite;
+            this.shortPositionedWritePosition = shortPositionedWritePosition;
+            this.shortPositionedWriteBytes = shortPositionedWriteBytes;
+        }
+
+        private static PartialFailingFileChannel shortPositionedWrite(FileChannel delegate, long position, int bytes) {
+            return new PartialFailingFileChannel(delegate, 0, false, position, bytes);
         }
 
         @Override
         public int write(ByteBuffer src) throws IOException {
-            if (!partialWriteDone) {
+            if (failRegularWrite && !partialWriteDone) {
                 int oldLimit = src.limit();
                 src.limit(src.position() + bytesBeforeFailure);
                 int written = delegate.write(src);
                 src.limit(oldLimit);
                 partialWriteDone = true;
                 return written;
-            } else if (!failureInjected) {
+            } else if (failRegularWrite && !failureInjected) {
                 failureInjected = true;
                 throw new IOException("simulated write failure after partial write");
             }
@@ -307,6 +375,14 @@ public class BufferedChannelTest {
 
         @Override
         public int write(ByteBuffer src, long position) throws IOException {
+            if (!shortPositionedWriteDone && position == shortPositionedWritePosition) {
+                int oldLimit = src.limit();
+                src.limit(src.position() + Math.min(shortPositionedWriteBytes, src.remaining()));
+                int written = delegate.write(src, position);
+                src.limit(oldLimit);
+                shortPositionedWriteDone = true;
+                return written;
+            }
             return delegate.write(src, position);
         }
 

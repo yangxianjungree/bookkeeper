@@ -231,6 +231,26 @@ public class DefaultEntryLogTest {
         return ("ledger-" + ledger + "-" + entry);
     }
 
+    private void writeSampleEntriesAndSealLog() throws Exception {
+        entryLogger.addEntry(1L, generateEntry(1, 1).nioBuffer());
+        entryLogger.addEntry(3L, generateEntry(3, 1).nioBuffer());
+        entryLogger.addEntry(2L, generateEntry(2, 1).nioBuffer());
+        entryLogger.addEntry(1L, generateEntry(1, 2).nioBuffer());
+
+        EntryLogManagerBase entryLogManager = (EntryLogManagerBase) entryLogger.getEntryLogManager();
+        entryLogManager.createNewLog(DefaultEntryLogger.UNASSIGNED_LEDGERID);
+        entryLogManager.flushRotatedLogs();
+    }
+
+    private static void assertSampleEntryLogMetadata(EntryLogMetadata meta) {
+        assertEquals(60, meta.getLedgersMap().get(1L));
+        assertEquals(30, meta.getLedgersMap().get(2L));
+        assertEquals(30, meta.getLedgersMap().get(3L));
+        assertFalse(meta.getLedgersMap().containsKey(4L));
+        assertEquals(120, meta.getTotalSize());
+        assertEquals(120, meta.getRemainingSize());
+    }
+
     @Test
     public void testMissingLogId() throws Exception {
         // create some entries
@@ -364,6 +384,51 @@ public class DefaultEntryLogTest {
         assertFalse(meta.getLedgersMap().containsKey(4L));
         assertEquals(120, meta.getTotalSize());
         assertEquals(120, meta.getRemainingSize());
+    }
+
+    @Test
+    public void testStaleHeaderLedgersMapOffsetFallsBackToScanning() throws Exception {
+        writeSampleEntriesAndSealLog();
+
+        File f = new File(curDir, "0.log");
+        RandomAccessFile raf = new RandomAccessFile(f, "rw");
+        raf.seek(DefaultEntryLogger.LEDGERS_MAP_OFFSET_POSITION);
+        raf.writeLong(DefaultEntryLogger.LOGFILE_HEADER_SIZE);
+        raf.close();
+
+        entryLogger = new DefaultEntryLogger(conf, dirsMgr);
+
+        try {
+            entryLogger.extractEntryLogMetadataFromIndex(0L);
+            fail("Should not trust a header map offset that points into the entry body");
+        } catch (IOException e) {
+            // Expected. The public method below should fall back to scanning entries.
+        }
+
+        assertSampleEntryLogMetadata(entryLogger.getEntryLogMetadata(0L));
+    }
+
+    @Test
+    public void testPartiallyWrittenLedgersMapFallsBackToScanning() throws Exception {
+        writeSampleEntriesAndSealLog();
+
+        File f = new File(curDir, "0.log");
+        RandomAccessFile raf = new RandomAccessFile(f, "rw");
+        raf.seek(DefaultEntryLogger.LEDGERS_MAP_OFFSET_POSITION);
+        long ledgersMapOffset = raf.readLong();
+        raf.setLength(ledgersMapOffset + Integer.BYTES + Long.BYTES);
+        raf.close();
+
+        entryLogger = new DefaultEntryLogger(conf, dirsMgr);
+
+        try {
+            entryLogger.extractEntryLogMetadataFromIndex(0L);
+            fail("Should not recover from a partially written ledgers map index");
+        } catch (IOException e) {
+            // Expected. The public method below should fall back to scanning entries.
+        }
+
+        assertSampleEntryLogMetadata(entryLogger.getEntryLogMetadata(0L));
     }
 
     @Test
