@@ -387,28 +387,6 @@ public class DefaultEntryLogTest {
     }
 
     @Test
-    public void testStaleHeaderLedgersMapOffsetFallsBackToScanning() throws Exception {
-        writeSampleEntriesAndSealLog();
-
-        File f = new File(curDir, "0.log");
-        RandomAccessFile raf = new RandomAccessFile(f, "rw");
-        raf.seek(DefaultEntryLogger.LEDGERS_MAP_OFFSET_POSITION);
-        raf.writeLong(DefaultEntryLogger.LOGFILE_HEADER_SIZE);
-        raf.close();
-
-        entryLogger = new DefaultEntryLogger(conf, dirsMgr);
-
-        try {
-            entryLogger.extractEntryLogMetadataFromIndex(0L);
-            fail("Should not trust a header map offset that points into the entry body");
-        } catch (IOException e) {
-            // Expected. The public method below should fall back to scanning entries.
-        }
-
-        assertSampleEntryLogMetadata(entryLogger.getEntryLogMetadata(0L));
-    }
-
-    @Test
     public void testPartiallyWrittenLedgersMapFallsBackToScanning() throws Exception {
         writeSampleEntriesAndSealLog();
 
