@@ -366,7 +366,9 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
                 return;
             }
             replicaOfCurrentLogChannels.remove(logChannel.getLogId());
-            rotatedLogChannels.add(logChannel);
+            synchronized (EntryLogManagerForEntryLogPerLedger.this) {
+                rotatedLogChannels.add(logChannel);
+            }
             entryLogsPerLedgerCounter.removedLedgerFromEntryLogMapCache(ledgerId,
                     removedLedgerEntryLogMapEntry.getCause());
         } finally {
@@ -430,7 +432,9 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
             replicaOfCurrentLogChannels.put(logChannel.getLogId(), logChannelWithDirInfo);
             if (hasToRotateLogChannel != null) {
                 replicaOfCurrentLogChannels.remove(hasToRotateLogChannel.getLogId());
-                rotatedLogChannels.add(hasToRotateLogChannel);
+                synchronized (EntryLogManagerForEntryLogPerLedger.this) {
+                    rotatedLogChannels.add(hasToRotateLogChannel);
+                }
             }
         } catch (Exception e) {
             log.error()
@@ -613,6 +617,19 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
         Set<BufferedLogChannelWithDirInfo> copyOfCurrentLogsWithDirInfo = getCopyOfCurrentLogs();
         for (BufferedLogChannelWithDirInfo currentLogWithDirInfo : copyOfCurrentLogsWithDirInfo) {
             IOUtils.close(log, currentLogWithDirInfo.getLogChannel());
+        }
+        while (true) {
+            List<BufferedLogChannel> channels;
+            synchronized (this) {
+                if (rotatedLogChannels.isEmpty()) {
+                    break;
+                }
+                channels = rotatedLogChannels;
+                rotatedLogChannels = new CopyOnWriteArrayList<BufferedLogChannel>();
+            }
+            for (BufferedLogChannel channel : channels) {
+                IOUtils.close(log, channel);
+            }
         }
     }
 

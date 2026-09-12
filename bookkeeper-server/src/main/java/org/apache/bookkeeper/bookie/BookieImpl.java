@@ -874,6 +874,9 @@ public class BookieImpl implements Bookie {
     // because shutdown can be called from sync thread which would be
     // interrupted by shutdown call.
     AtomicBoolean shutdownTriggered = new AtomicBoolean(false);
+    // Startup flush runs before stateManager.initState(), so isRunning() is false if it fails.
+    // Track shutdown independently to ensure the cleanup path still runs exactly once.
+    private final AtomicBoolean shutdownStarted = new AtomicBoolean(false);
     void triggerBookieShutdown(final int exitCode) {
         if (!shutdownTriggered.compareAndSet(false, true)) {
             return;
@@ -902,7 +905,7 @@ public class BookieImpl implements Bookie {
     int shutdown(int exitCode) {
         lock.lock();
         try {
-            if (isRunning()) {
+            if (shutdownStarted.compareAndSet(false, true)) {
                 // the exitCode only set when first shutdown usually due to exception found
                 log.info()
                         .attr("bookiePort", conf.getBookiePort())

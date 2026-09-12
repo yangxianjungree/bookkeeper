@@ -221,6 +221,16 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
     @Override
     public void forceClose() {
         IOUtils.close(log, activeLogChannel);
+        List<BufferedLogChannel> rotatedChannels;
+        synchronized (this) {
+            rotatedChannels = rotatedLogChannels;
+            rotatedLogChannels = new LinkedList<BufferedLogChannel>();
+        }
+        if (rotatedChannels != null) {
+            for (BufferedLogChannel channel : rotatedChannels) {
+                IOUtils.close(log, channel);
+            }
+        }
     }
 
     @Override

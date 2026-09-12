@@ -552,6 +552,31 @@ public class DefaultEntryLogTest {
         entryLogger.close();
     }
 
+    @Test
+    public void testCloseReleasesFailedRotatedLogs() throws Exception {
+        entryLogger.close();
+
+        for (boolean perLedger : new boolean[] { false, true }) {
+            conf.setEntryLogPerLedgerEnabled(perLedger);
+            conf.setEntryLogFilePreAllocationEnabled(false);
+            entryLogger = new DefaultEntryLogger(conf, dirsMgr);
+            EntryLogManagerBase entryLogManager = (EntryLogManagerBase) entryLogger.getEntryLogManager();
+
+            BufferedLogChannel rotated = createDummyBufferedLogChannel(1, conf);
+            BufferedLogChannel active = createDummyBufferedLogChannel(2, conf);
+            entryLogManager.setCurrentLogForLedgerAndAddToRotate(1L, rotated);
+            entryLogManager.setCurrentLogForLedgerAndAddToRotate(1L, active);
+            rotated.markWriteFailure(new IOException("injected rotated log failure"));
+
+            entryLogger.close();
+
+            assertFalse(rotated.fileChannel.isOpen(), "Failed rotated log file should be closed");
+            assertEquals(0, rotated.writeBuffer.refCnt(), "Failed rotated log buffer should be released");
+            assertFalse(active.fileChannel.isOpen(), "Active log file should be closed");
+            assertEquals(0, active.writeBuffer.refCnt(), "Active log buffer should be released");
+        }
+    }
+
     /**
      * Test the getEntryLogsSet() method.
      */
@@ -1440,7 +1465,7 @@ public class DefaultEntryLogTest {
             assertFalse(entryLogManager.getRotatedLogChannels().contains(logChannel),
                     "Failed log channel should not be added to rotated logs");
         } finally {
-            logChannel.close();
+            entryLogger.close();
         }
     }
 
