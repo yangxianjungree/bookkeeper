@@ -604,6 +604,9 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
 
     private void notifyFatalEntryLogWriteFailure(EntryLogWriteException e) {
         log.error().exception(e).log("Fatal entry log write failure during background flush");
+        if (fatalEntryLogWriteFailure == null) {
+            fatalEntryLogWriteFailure = e;
+        }
         fatalErrorListener.fatalError();
     }
 
