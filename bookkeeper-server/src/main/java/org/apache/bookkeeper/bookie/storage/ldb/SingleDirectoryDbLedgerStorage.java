@@ -261,7 +261,13 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         if (fatalErrorListener != null) {
             this.fatalErrorListener = fatalErrorListener;
             if (entryLogger instanceof DefaultEntryLogger) {
-                ((DefaultEntryLogger) entryLogger).setFatalErrorListener(fatalErrorListener);
+                ((DefaultEntryLogger) entryLogger).setFatalErrorListener(new LedgerDirsListener() {
+                    @Override
+                    public void fatalError() {
+                        notifyFatalEntryLogWriteFailure(new EntryLogWriteException(
+                                "Fatal entry log write failure", new IOException("entry logger reported failure")));
+                    }
+                });
             }
         }
     }
@@ -604,8 +610,10 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
 
     private void notifyFatalEntryLogWriteFailure(EntryLogWriteException e) {
         log.error().exception(e).log("Fatal entry log write failure during background flush");
-        if (fatalEntryLogWriteFailure == null) {
-            fatalEntryLogWriteFailure = e;
+        synchronized (flushMutex) {
+            if (fatalEntryLogWriteFailure == null) {
+                fatalEntryLogWriteFailure = e;
+            }
         }
         fatalErrorListener.fatalError();
     }
