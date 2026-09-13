@@ -365,8 +365,9 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
                         e);
                 return;
             }
-            replicaOfCurrentLogChannels.remove(logChannel.getLogId());
             synchronized (EntryLogManagerForEntryLogPerLedger.this) {
+                // Keep eviction handoff atomic with flush() snapshots.
+                replicaOfCurrentLogChannels.remove(logChannel.getLogId());
                 rotatedLogChannels.add(logChannel);
             }
             entryLogsPerLedgerCounter.removedLedgerFromEntryLogMapCache(ledgerId,
@@ -431,8 +432,10 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
             entryLogsPerLedgerCounter.openNewEntryLogForLedger(ledgerId, newLedgerInEntryLogMapCache);
             replicaOfCurrentLogChannels.put(logChannel.getLogId(), logChannelWithDirInfo);
             if (hasToRotateLogChannel != null) {
-                replicaOfCurrentLogChannels.remove(hasToRotateLogChannel.getLogId());
                 synchronized (EntryLogManagerForEntryLogPerLedger.this) {
+                    // Keep the current-to-rotated handoff atomic with flush(),
+                    // which uses the same manager monitor for its snapshots.
+                    replicaOfCurrentLogChannels.remove(hasToRotateLogChannel.getLogId());
                     rotatedLogChannels.add(hasToRotateLogChannel);
                 }
             }
