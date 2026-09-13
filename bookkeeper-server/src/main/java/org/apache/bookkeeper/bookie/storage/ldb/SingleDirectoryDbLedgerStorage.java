@@ -967,7 +967,16 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         Checkpoint cp = checkpointSource.newCheckpoint();
         checkpoint(cp);
         if (singleLedgerDirs) {
-            checkpointSource.checkpointComplete(cp, true);
+            flushMutex.lock();
+            try {
+                EntryLogWriteException failure = fatalEntryLogWriteFailure;
+                if (failure != null) {
+                    throw failure;
+                }
+                checkpointSource.checkpointComplete(cp, true);
+            } finally {
+                flushMutex.unlock();
+            }
         }
     }
 

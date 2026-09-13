@@ -430,9 +430,9 @@ class EntryLogManagerForEntryLogPerLedger extends EntryLogManagerBase {
             BufferedLogChannelWithDirInfo logChannelWithDirInfo = new BufferedLogChannelWithDirInfo(logChannel);
             ledgerIdEntryLogMap.get(ledgerId).setEntryLogWithDirInfo(logChannelWithDirInfo);
             entryLogsPerLedgerCounter.openNewEntryLogForLedger(ledgerId, newLedgerInEntryLogMapCache);
-            replicaOfCurrentLogChannels.put(logChannel.getLogId(), logChannelWithDirInfo);
-            if (hasToRotateLogChannel != null) {
-                synchronized (EntryLogManagerForEntryLogPerLedger.this) {
+            synchronized (EntryLogManagerForEntryLogPerLedger.this) {
+                replicaOfCurrentLogChannels.put(logChannel.getLogId(), logChannelWithDirInfo);
+                if (hasToRotateLogChannel != null) {
                     // Keep the current-to-rotated handoff atomic with flush(),
                     // which uses the same manager monitor for its snapshots.
                     replicaOfCurrentLogChannels.remove(hasToRotateLogChannel.getLogId());

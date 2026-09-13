@@ -23,6 +23,7 @@ package org.apache.bookkeeper.bookie.storage.ldb;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -35,8 +36,10 @@ import io.netty.buffer.Unpooled;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.EntryLogWriteException;
@@ -144,31 +147,59 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
         CheckpointSource checkpointSource = mock(CheckpointSource.class);
         when(checkpointSource.newCheckpoint()).thenReturn(CheckpointSource.Checkpoint.MAX);
         storage.setCheckpointSource(checkpointSource);
+        when(entryLogger.addEntry(org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.any())).thenReturn(0L);
+        storage.setMasterKey(1L, "key".getBytes());
+        ByteBuf entry = Unpooled.buffer(32);
+        try {
+            entry.writeLong(1L);
+            entry.writeLong(0L);
+            storage.addEntry(entry);
+        } finally {
+            entry.release();
+        }
 
         storage.flushMutex.lock();
-        ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        CountDownLatch firstFlushStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstFlush = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            firstFlushStarted.countDown();
+            releaseFirstFlush.await();
+            throw new EntryLogWriteException("injected", new IOException("injected"));
+        }).when(entryLogger).flush();
+        Future<?> firstFlush;
         Future<?> queuedFlush;
         try {
-            queuedFlush = executor.submit(() -> {
+            firstFlush = executor.submit(() -> {
                 try {
                     storage.flush();
-                } catch (IOException expected) {
-                    throw new RuntimeException(expected);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
                 }
             });
-            while (!storage.flushMutex.hasQueuedThreads()) {
-                Thread.yield();
-            }
-
-            Field failureField = SingleDirectoryDbLedgerStorage.class
-                    .getDeclaredField("fatalEntryLogWriteFailure");
-            failureField.setAccessible(true);
-            failureField.set(storage,
-                    new EntryLogWriteException("injected", new IOException("injected")));
         } finally {
             storage.flushMutex.unlock();
         }
+        assertTrue(firstFlushStarted.await(10, TimeUnit.SECONDS));
+        queuedFlush = executor.submit(() -> {
+            try {
+                storage.flush();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        while (!storage.flushMutex.hasQueuedThreads()) {
+            Thread.yield();
+        }
+        releaseFirstFlush.countDown();
 
+        try {
+            firstFlush.get();
+            fail("first flush should fail");
+        } catch (java.util.concurrent.ExecutionException expected) {
+            // The first flush records the terminal failure.
+        }
         try {
             queuedFlush.get();
             fail("queued flush should fail after terminal entry-log failure");
