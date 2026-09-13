@@ -837,10 +837,6 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         if (failure != null) {
             throw failure;
         }
-        if (lastCheckpoint.compareTo(checkpoint) > 0) {
-            return;
-        }
-
         // Only a single flush operation can happen at a time
         flushMutex.lock();
         long startTime = -1;
@@ -858,6 +854,9 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
             failure = fatalEntryLogWriteFailure;
             if (failure != null) {
                 throw failure;
+            }
+            if (lastCheckpoint.compareTo(checkpoint) > 0) {
+                return;
             }
             if (writeCache.isEmpty()) {
                 return;
