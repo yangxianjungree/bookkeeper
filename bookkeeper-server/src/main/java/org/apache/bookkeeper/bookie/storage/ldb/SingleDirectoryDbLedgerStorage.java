@@ -853,6 +853,12 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         }
 
         try {
+            // Re-check after acquiring the mutex: a concurrent flush may have
+            // recorded a terminal entry-log failure while this call waited.
+            failure = fatalEntryLogWriteFailure;
+            if (failure != null) {
+                throw failure;
+            }
             if (writeCache.isEmpty()) {
                 return;
             }

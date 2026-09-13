@@ -21,6 +21,7 @@
 package org.apache.bookkeeper.bookie.storage.ldb;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -35,6 +36,7 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.EntryLogWriteException;
@@ -61,7 +63,7 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
 
     private File tmpDir;
     private EntryLogger entryLogger;
-    private FailingFlushSingleDirectoryDbLedgerStorage storage;
+    private SingleDirectoryDbLedgerStorage storage;
 
     @Before
     public void setup() throws Exception {
@@ -79,7 +81,7 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
         LedgerDirsManager indexDirsManager = new LedgerDirsManager(conf, conf.getLedgerDirs(), diskChecker);
         entryLogger = mock(EntryLogger.class);
 
-        storage = new FailingFlushSingleDirectoryDbLedgerStorage(conf, mock(LedgerManager.class),
+        storage = new SingleDirectoryDbLedgerStorage(conf, mock(LedgerManager.class),
                 ledgerDirsManager, indexDirsManager, entryLogger, NullStatsLogger.INSTANCE,
                 ByteBufAllocator.DEFAULT, MB, MB, 1, 1024);
     }
@@ -94,6 +96,8 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
 
     @Test
     public void shutdownContinuesCleanupAfterFlushFailure() throws Exception {
+        doThrow(new EntryLogWriteException("entry log flush failed", new IOException("injected")))
+                .when(entryLogger).flush();
         storage.shutdown();
         verify(entryLogger).close();
         assertFalse(isGcThreadRunning());
@@ -136,6 +140,48 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean());
     }
 
+    @Test
+    public void queuedCheckpointRechecksTerminalFailureAfterAcquiringMutex() throws Exception {
+        CheckpointSource checkpointSource = mock(CheckpointSource.class);
+        when(checkpointSource.newCheckpoint()).thenReturn(CheckpointSource.Checkpoint.MAX);
+        storage.setCheckpointSource(checkpointSource);
+
+        storage.flushMutex.lock();
+        ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        Future<?> queuedFlush;
+        try {
+            queuedFlush = executor.submit(() -> {
+                try {
+                    storage.flush();
+                } catch (IOException expected) {
+                    throw new RuntimeException(expected);
+                }
+            });
+            while (!storage.flushMutex.hasQueuedThreads()) {
+                Thread.yield();
+            }
+
+            Field failureField = SingleDirectoryDbLedgerStorage.class
+                    .getDeclaredField("fatalEntryLogWriteFailure");
+            failureField.setAccessible(true);
+            failureField.set(storage,
+                    new EntryLogWriteException("injected", new IOException("injected")));
+        } finally {
+            storage.flushMutex.unlock();
+        }
+
+        try {
+            queuedFlush.get();
+            fail("queued flush should fail after terminal entry-log failure");
+        } catch (java.util.concurrent.ExecutionException expected) {
+            // The queued flush must observe the failure after acquiring the mutex.
+        } finally {
+            executor.shutdownNow();
+        }
+        verify(checkpointSource, never()).checkpointComplete(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean());
+    }
+
     private boolean isGcThreadRunning() throws Exception {
         Field gcThreadField = SingleDirectoryDbLedgerStorage.class.getDeclaredField("gcThread");
         gcThreadField.setAccessible(true);
@@ -152,20 +198,4 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
         return (ExecutorService) cleanupExecutorField.get(storage);
     }
 
-    private static class FailingFlushSingleDirectoryDbLedgerStorage extends SingleDirectoryDbLedgerStorage {
-
-        FailingFlushSingleDirectoryDbLedgerStorage(ServerConfiguration conf, LedgerManager ledgerManager,
-                LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager, EntryLogger entryLogger,
-                StatsLogger statsLogger, ByteBufAllocator allocator, long writeCacheSize, long readCacheSize,
-                int readAheadCacheBatchSize, long readAheadCacheBatchBytesSize)
-                throws IOException {
-            super(conf, ledgerManager, ledgerDirsManager, indexDirsManager, entryLogger, statsLogger, allocator,
-                    writeCacheSize, readCacheSize, readAheadCacheBatchSize, readAheadCacheBatchBytesSize);
-        }
-
-        @Override
-        public void flush() throws IOException {
-            throw new EntryLogWriteException("entry log flush failed", new IOException("injected"));
-        }
-    }
 }
