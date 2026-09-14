@@ -141,17 +141,23 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
             entry.release();
         }
 
+        boolean firstFailed = false;
         try {
             storage.flush();
         } catch (EntryLogWriteException expected) {
             // First flush records the terminal entry-log failure.
+            firstFailed = true;
         }
+        assertTrue("first flush should fail", firstFailed);
 
+        boolean secondFailed = false;
         try {
             storage.flush();
         } catch (EntryLogWriteException expected) {
             // A later empty-cache flush must remain failed.
+            secondFailed = true;
         }
+        assertTrue("later empty-cache flush should remain failed", secondFailed);
         verify(checkpointSource, never()).checkpointComplete(
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean());
     }
@@ -195,32 +201,37 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
         } finally {
             storage.flushMutex.unlock();
         }
-        assertTrue(firstFlushStarted.await(10, TimeUnit.SECONDS));
-        queuedFlush = executor.submit(() -> {
-            try {
-                storage.flush();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+        try {
+            assertTrue(firstFlushStarted.await(10, TimeUnit.SECONDS));
+            queuedFlush = executor.submit(() -> {
+                try {
+                    storage.flush();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (!storage.flushMutex.hasQueuedThreads() && System.nanoTime() < deadline) {
+                Thread.yield();
             }
-        });
-        while (!storage.flushMutex.hasQueuedThreads()) {
-            Thread.yield();
-        }
-        releaseFirstFlush.countDown();
+            assertTrue("queued flush did not wait for flush mutex", storage.flushMutex.hasQueuedThreads());
+            releaseFirstFlush.countDown();
 
-        try {
-            firstFlush.get();
-            fail("first flush should fail");
-        } catch (java.util.concurrent.ExecutionException expected) {
-            // The first flush records the terminal failure.
-        }
-        try {
-            queuedFlush.get();
-            fail("queued flush should fail after terminal entry-log failure");
-        } catch (java.util.concurrent.ExecutionException expected) {
-            // The queued flush must observe the failure after acquiring the mutex.
+            try {
+                firstFlush.get(10, TimeUnit.SECONDS);
+                fail("first flush should fail");
+            } catch (java.util.concurrent.ExecutionException expected) {
+                assertTrue(expected.getCause().getCause() instanceof EntryLogWriteException);
+            }
+            try {
+                queuedFlush.get(10, TimeUnit.SECONDS);
+                fail("queued flush should fail after terminal entry-log failure");
+            } catch (java.util.concurrent.ExecutionException expected) {
+                assertTrue(expected.getCause().getCause() instanceof EntryLogWriteException);
+            }
         } finally {
             executor.shutdownNow();
+            releaseFirstFlush.countDown();
         }
         verify(checkpointSource, never()).checkpointComplete(
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean());

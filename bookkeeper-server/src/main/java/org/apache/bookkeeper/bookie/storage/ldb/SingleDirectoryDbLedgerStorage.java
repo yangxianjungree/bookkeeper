@@ -366,6 +366,11 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         InterruptedException interrupted = null;
 
         try {
+            // Wait for an in-flight flush before the fatal-state fast path can
+            // return. Otherwise shutdown could close caches while that flush is
+            // still using them.
+            flushMutex.lock();
+            flushMutex.unlock();
             flush();
         } catch (IOException e) {
             log.error().exception(e).log("Error flushing db storage during shutdown");
