@@ -46,7 +46,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.StampedLock;
 import lombok.CustomLog;
@@ -137,7 +136,8 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
     private CheckpointSource checkpointSource = CheckpointSource.DEFAULT;
     private Checkpoint lastCheckpoint = Checkpoint.MIN;
     private volatile LedgerDirsListener fatalErrorListener = new LedgerDirsListener() { };
-    private final AtomicReference<EntryLogWriteException> fatalEntryLogWriteFailure = new AtomicReference<>();
+    private volatile EntryLogWriteException fatalEntryLogWriteFailure;
+    private final Object fatalEntryLogWriteFailureLock = new Object();
 
     private final long writeCacheMaxSize;
     private final long readCacheMaxSize;
@@ -611,10 +611,15 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
 
     private void notifyFatalEntryLogWriteFailure(EntryLogWriteException e) {
         log.error().exception(e).log("Fatal entry log write failure during background flush");
-        // Publish without taking flushMutex: this callback can run while holding a
+        // Do not take flushMutex here: this callback can run while holding a
         // per-ledger lock, whereas checkpoint() may hold flushMutex while waiting
-        // for that same lock. Completion rechecks this atomic state under the lock.
-        fatalEntryLogWriteFailure.compareAndSet(null, e);
+        // for that same lock. A separate lock also lets checkpoint completion
+        // atomically exclude a concurrent failure publication.
+        synchronized (fatalEntryLogWriteFailureLock) {
+            if (fatalEntryLogWriteFailure == null) {
+                fatalEntryLogWriteFailure = e;
+            }
+        }
         fatalErrorListener.fatalError();
     }
 
@@ -844,7 +849,7 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
     @Override
     public void checkpoint(Checkpoint checkpoint) throws IOException {
         Checkpoint thisCheckpoint = checkpointSource.newCheckpoint();
-        EntryLogWriteException failure = fatalEntryLogWriteFailure.get();
+        EntryLogWriteException failure = fatalEntryLogWriteFailure;
         if (failure != null) {
             throw failure;
         }
@@ -862,7 +867,7 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         try {
             // Re-check after acquiring the mutex: a concurrent flush may have
             // recorded a terminal entry-log failure while this call waited.
-            failure = fatalEntryLogWriteFailure.get();
+            failure = fatalEntryLogWriteFailure;
             if (failure != null) {
                 throw failure;
             }
@@ -923,7 +928,11 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
             recordSuccessfulEvent(dbLedgerStorageStats.getFlushStats(), startTime);
             dbLedgerStorageStats.getFlushSizeStats().registerSuccessfulValue(sizeToFlush);
         } catch (EntryLogWriteException e) {
-            fatalEntryLogWriteFailure.compareAndSet(null, e);
+            synchronized (fatalEntryLogWriteFailureLock) {
+                if (fatalEntryLogWriteFailure == null) {
+                    fatalEntryLogWriteFailure = e;
+                }
+            }
             recordFailedEvent(dbLedgerStorageStats.getFlushStats(), startTime);
             throw e;
         } catch (IOException e) {
@@ -980,11 +989,13 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         if (singleLedgerDirs) {
             flushMutex.lock();
             try {
-                EntryLogWriteException failure = fatalEntryLogWriteFailure.get();
-                if (failure != null) {
-                    throw failure;
+                synchronized (fatalEntryLogWriteFailureLock) {
+                    EntryLogWriteException failure = fatalEntryLogWriteFailure;
+                    if (failure != null) {
+                        throw failure;
+                    }
+                    checkpointSource.checkpointComplete(cp, true);
                 }
-                checkpointSource.checkpointComplete(cp, true);
             } finally {
                 flushMutex.unlock();
             }
