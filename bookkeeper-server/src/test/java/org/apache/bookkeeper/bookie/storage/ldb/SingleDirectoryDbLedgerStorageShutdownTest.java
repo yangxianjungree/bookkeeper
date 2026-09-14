@@ -98,9 +98,23 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
 
     @Test
     public void shutdownContinuesCleanupAfterFlushFailure() throws Exception {
+        when(entryLogger.addEntry(org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.any())).thenReturn(0L);
         doThrow(new EntryLogWriteException("entry log flush failed", new IOException("injected")))
                 .when(entryLogger).flush();
+
+        storage.setMasterKey(1L, "key".getBytes());
+        ByteBuf entry = Unpooled.buffer(32);
+        try {
+            entry.writeLong(1L);
+            entry.writeLong(0L);
+            storage.addEntry(entry);
+        } finally {
+            entry.release();
+        }
+
         storage.shutdown();
+        verify(entryLogger).flush();
         verify(entryLogger).close();
         assertFalse(isGcThreadRunning());
         assertTrue(getCleanupExecutor().isShutdown());

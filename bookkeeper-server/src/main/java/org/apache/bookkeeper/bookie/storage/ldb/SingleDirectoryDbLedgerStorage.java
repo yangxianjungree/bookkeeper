@@ -610,10 +610,15 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
 
     private void notifyFatalEntryLogWriteFailure(EntryLogWriteException e) {
         log.error().exception(e).log("Fatal entry log write failure during background flush");
-        synchronized (flushMutex) {
+        // Publish the terminal failure under the same lock used by checkpoint(),
+        // so a waiting checkpoint cannot complete after a fatal flush failure.
+        flushMutex.lock();
+        try {
             if (fatalEntryLogWriteFailure == null) {
                 fatalEntryLogWriteFailure = e;
             }
+        } finally {
+            flushMutex.unlock();
         }
         fatalErrorListener.fatalError();
     }
