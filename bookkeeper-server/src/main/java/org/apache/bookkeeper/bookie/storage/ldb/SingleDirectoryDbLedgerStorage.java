@@ -366,11 +366,6 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         InterruptedException interrupted = null;
 
         try {
-            // Wait for an in-flight flush before the fatal-state fast path can
-            // return. Otherwise shutdown could close caches while that flush is
-            // still using them.
-            flushMutex.lock();
-            flushMutex.unlock();
             flush();
         } catch (IOException e) {
             log.error().exception(e).log("Error flushing db storage during shutdown");
@@ -389,11 +384,17 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
             }
 
             cleanupExecutor.shutdown();
-            try {
-                cleanupExecutor.awaitTermination(1, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
+            boolean cleanupInterrupted = false;
+            while (!cleanupExecutor.isTerminated()) {
+                try {
+                    cleanupExecutor.awaitTermination(1, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    cleanupInterrupted = true;
+                }
+            }
+            if (cleanupInterrupted) {
                 if (interrupted == null) {
-                    interrupted = e;
+                    interrupted = new InterruptedException("Interrupted while waiting for cleanup tasks");
                 }
                 Thread.currentThread().interrupt();
             }
@@ -854,10 +855,6 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
     @Override
     public void checkpoint(Checkpoint checkpoint) throws IOException {
         Checkpoint thisCheckpoint = checkpointSource.newCheckpoint();
-        EntryLogWriteException failure = fatalEntryLogWriteFailure;
-        if (failure != null) {
-            throw failure;
-        }
         // Only a single flush operation can happen at a time
         flushMutex.lock();
         long startTime = -1;
@@ -872,7 +869,7 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
         try {
             // Re-check after acquiring the mutex: a concurrent flush may have
             // recorded a terminal entry-log failure while this call waited.
-            failure = fatalEntryLogWriteFailure;
+            EntryLogWriteException failure = fatalEntryLogWriteFailure;
             if (failure != null) {
                 throw failure;
             }
