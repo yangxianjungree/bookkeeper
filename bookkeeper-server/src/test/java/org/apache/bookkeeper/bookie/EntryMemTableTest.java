@@ -303,9 +303,7 @@ public class EntryMemTableTest implements CacheCallback, SkipListFlusher, Checkp
 
     @Test
     public void testFlushFailsWhenParallelFlushExecutorIsClosed() throws Exception {
-        if (!entryMemTableClass.equals(EntryMemTableWithParallelFlusher.class)) {
-            return;
-        }
+        assumeTrue(entryMemTableClass.equals(EntryMemTableWithParallelFlusher.class));
         memTable.addEntry(1L, 1L, ByteBuffer.wrap(new byte[10]), this);
         memTable.snapshot();
         memTable.close();
