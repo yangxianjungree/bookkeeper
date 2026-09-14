@@ -25,6 +25,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 import io.netty.buffer.ByteBuf;
 import java.io.IOException;
@@ -318,9 +319,7 @@ public class EntryMemTableTest implements CacheCallback, SkipListFlusher, Checkp
 
     @Test
     public void testParallelFlushErrorPreservesSnapshot() throws Exception {
-        if (!entryMemTableClass.equals(EntryMemTableWithParallelFlusher.class)) {
-            return;
-        }
+        assumeTrue(entryMemTableClass.equals(EntryMemTableWithParallelFlusher.class));
         memTable.addEntry(1L, 1L, ByteBuffer.wrap(new byte[10]), this);
         memTable.snapshot();
 
