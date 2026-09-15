@@ -394,8 +394,13 @@ public class DefaultEntryLogTest {
             assertEntryCompareEqualsAndRelease(generateEntry(2, 1), ledgerStorage.getEntry(2, 1));
             assertEntryCompareEqualsAndRelease(generateEntry(3, 1), ledgerStorage.getEntry(3, 1));
         } finally {
-            entryLogger.close();
-            bookie.shutdown();
+            // Bookie owns the logger after it is installed in ledger storage.
+            // Shut it down first so storage does not flush an already-closed logger.
+            try {
+                bookie.shutdown();
+            } finally {
+                entryLogger.close();
+            }
         }
     }
 

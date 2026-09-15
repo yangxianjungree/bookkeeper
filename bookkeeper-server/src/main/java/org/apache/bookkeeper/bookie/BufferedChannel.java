@@ -46,6 +46,10 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
      * The buffer used to write operations.
      */
     protected final ByteBuf writeBuffer;
+    // The file channel may fail to close after the buffer has already been released.
+    // Track the two resources independently so a later force-close can retry the file
+    // channel without releasing the buffer twice.
+    private volatile boolean writeBufferReleased;
     /**
      * The absolute position of the next write operation.
      */
@@ -102,7 +106,10 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
         if (closed) {
             return;
         }
-        ReferenceCountUtil.release(writeBuffer);
+        if (!writeBufferReleased) {
+            ReferenceCountUtil.release(writeBuffer);
+            writeBufferReleased = true;
+        }
         fileChannel.close();
         closed = true;
     }
@@ -368,6 +375,12 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
         IOException failure = writeFailure;
         if (failure != null) {
             throw new IOException("BufferedChannel is in failed state", failure);
+        }
+        // close() releases the write buffer before attempting the file-channel close.
+        // If that close fails, forceClose() must be able to retry the file channel, but
+        // no caller may continue writing through the already released buffer.
+        if (writeBufferReleased) {
+            throw new IOException("BufferedChannel is closed");
         }
     }
 
