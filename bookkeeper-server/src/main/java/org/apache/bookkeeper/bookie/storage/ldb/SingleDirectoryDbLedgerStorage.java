@@ -369,44 +369,50 @@ public class SingleDirectoryDbLedgerStorage implements CompactableLedgerStorage 
             flush();
         } catch (IOException e) {
             log.error().exception(e).log("Error flushing db storage during shutdown");
-        } finally {
-            try {
-                gcThread.shutdown();
-            } catch (InterruptedException e) {
-                interrupted = e;
-                Thread.currentThread().interrupt();
-            }
-
-            try {
-                entryLogger.close();
-            } catch (IOException e) {
-                log.error().exception(e).log("Error closing entry logger during shutdown");
-            }
-
-            cleanupExecutor.shutdown();
-            boolean cleanupInterrupted = false;
-            while (!cleanupExecutor.isTerminated()) {
-                try {
-                    cleanupExecutor.awaitTermination(1, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    cleanupInterrupted = true;
-                }
-            }
-            if (cleanupInterrupted) {
-                if (interrupted == null) {
-                    interrupted = new InterruptedException("Interrupted while waiting for cleanup tasks");
-                }
-                Thread.currentThread().interrupt();
-            }
-
-            IOUtils.close(log, ledgerIndex);
-            IOUtils.close(log, entryLocationIndex);
-
-            writeCache.close();
-            writeCacheBeingFlushed.close();
-            readCache.close();
-            executor.shutdown();
         }
+
+        // Compaction may still be using the entry logger and indexes while GC shuts down.
+        // If waiting for GC is interrupted, propagate the interruption immediately instead
+        // of closing resources from a finally block and racing the active compaction.
+        try {
+            gcThread.shutdown();
+        } catch (InterruptedException e) {
+            // Do not continue cleanup here: compaction may still be using these resources.
+            // The caller must handle the interrupted shutdown, preserving the pre-change
+            // safety boundary instead of racing the active compaction.
+            Thread.currentThread().interrupt();
+            throw e;
+        }
+
+        try {
+            entryLogger.close();
+        } catch (IOException e) {
+            log.error().exception(e).log("Error closing entry logger during shutdown");
+        }
+
+        cleanupExecutor.shutdown();
+        boolean cleanupInterrupted = false;
+        while (!cleanupExecutor.isTerminated()) {
+            try {
+                cleanupExecutor.awaitTermination(1, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                cleanupInterrupted = true;
+                interrupted = e;
+            }
+        }
+        if (cleanupInterrupted) {
+            // Cleanup tasks must drain before the indexes they use are closed. Preserve the
+            // caller's interruption without abandoning the drain once it has started.
+            Thread.currentThread().interrupt();
+        }
+
+        IOUtils.close(log, ledgerIndex);
+        IOUtils.close(log, entryLocationIndex);
+
+        writeCache.close();
+        writeCacheBeingFlushed.close();
+        readCache.close();
+        executor.shutdown();
 
         if (interrupted != null) {
             throw interrupted;

@@ -40,6 +40,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.EntryLogWriteException;
@@ -235,6 +236,28 @@ public class SingleDirectoryDbLedgerStorageShutdownTest {
         }
         verify(checkpointSource, never()).checkpointComplete(
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyBoolean());
+    }
+
+    @Test
+    public void interruptedGcShutdownDoesNotCloseResources() throws Exception {
+        Field gcThreadField = SingleDirectoryDbLedgerStorage.class.getDeclaredField("gcThread");
+        gcThreadField.setAccessible(true);
+        GarbageCollectorThread gcThread = (GarbageCollectorThread) gcThreadField.get(storage);
+        Field compactingField = GarbageCollectorThread.class.getDeclaredField("compacting");
+        compactingField.setAccessible(true);
+        ((AtomicBoolean) compactingField.get(gcThread)).set(true);
+
+        Thread.currentThread().interrupt();
+        try {
+            storage.shutdown();
+            fail("shutdown should propagate interruption while GC is compacting");
+        } catch (InterruptedException expected) {
+            // The shutdown path must not close resources until GC confirms compaction stopped.
+            verify(entryLogger, never()).close();
+        } finally {
+            ((AtomicBoolean) compactingField.get(gcThread)).set(false);
+            Thread.interrupted();
+        }
     }
 
     private boolean isGcThreadRunning() throws Exception {
